@@ -1,1 +1,1 @@
-sudo xbps-install -Sy $(cat installed-packages.txt)
+sudo xbps-install -Syu $(cat installed-packages.txt)
