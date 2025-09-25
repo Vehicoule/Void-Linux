@@ -75,6 +75,12 @@ if ! mount ${SSD_DEVICE}1 /mnt/boot/efi; then
     handle_error "Failed to mount ESP"
 fi
 
+# Update repository data
+echo "Updating repository data..."
+if ! xbps-install -S; then
+    handle_error "Failed to update repository data"
+fi
+
 # Install the base system
 echo "Installing base system..."
 if ! xbps-install -r /mnt base-system; then
