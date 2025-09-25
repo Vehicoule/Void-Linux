@@ -85,6 +85,7 @@ mkdir -p /mnt/boot/efi
 mount "$ESP" /mnt/boot/efi
 
 # Bind mounts for chroot operations
+mkdir -p /mnt/{proc,sys,dev}
 for d in proc sys dev; do
   mount --bind "/$d" "/mnt/$d"
 done
