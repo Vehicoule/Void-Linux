@@ -97,22 +97,14 @@ cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ || true
 export XBPS_ARCH="$ARCH"
 xbps-install -S -r /mnt -R "$REPO" base-system
 
-# Install xtools and enable all repos
-xbps-install -Sy xtools void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
-
-# Update and sync
-xbps-install -Syu
-
 # Kernel, firmware, headers, initramfs, filesystem tools, bootloader, essentials
 xbps-install -S -r /mnt -R "$REPO" \
-  linux linux-headers linux-firmware dracut bcachefs-tools cryptsetup limine xtools \
+  linux linux-headers linux-firmware dracut bcachefs-tools cryptsetup limine xtools void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree\
   dosfstools parted \
   sudo dhcpcd \
   pciutils usbutils \
   git curl wget neovim htop tmux \
   python3 python3-pip python3-virtualenv \
-  zramen \
-  vulkan-loader nvidia nvidia-libs nvidia-libs-32bit nvidia-opencl
 
 # ================== fstab ==================
 xgenfstab -U /mnt > /mnt/etc/fstab
