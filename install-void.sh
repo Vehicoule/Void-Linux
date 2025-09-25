@@ -24,15 +24,6 @@ else
     ENCRYPT=false
 fi
 
-# Ask about glibc vs musl
-read -p "Do you want to use musl instead of glibc? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    LIBC="musl"
-else
-    LIBC="glibc"
-fi
-
 # Partition the SSD
 echo "Partitioning ${SSD_DEVICE}..."
 if ! sgdisk -Z ${SSD_DEVICE}; then
@@ -84,25 +75,41 @@ if ! mount ${SSD_DEVICE}1 /mnt/boot/efi; then
     handle_error "Failed to mount ESP"
 fi
 
-# Install the base system with the chosen libc
-echo "Installing base system with ${LIBC}..."
-if [ "$LIBC" = "musl" ]; then
-    if ! xbps-install -r /mnt base-system-musl; then
-        handle_error "Failed to install base-system-musl"
-    fi
-else
-    if ! xbps-install -r /mnt base-system; then
-        handle_error "Failed to install base-system"
-    fi
+# Install the base system
+echo "Installing base system..."
+if ! xbps-install -r /mnt base-system; then
+    handle_error "Failed to install base-system"
 fi
 
-# Configure the system
-echo "Configuring the system..."
+# Set up the chroot environment
+echo "Setting up chroot environment..."
+if ! mkdir -p /mnt/dev; then
+    handle_error "Failed to create /mnt/dev directory"
+fi
+if ! mkdir -p /mnt/proc; then
+    handle_error "Failed to create /mnt/proc directory"
+fi
+if ! mkdir -p /mnt/sys; then
+    handle_error "Failed to create /mnt/sys directory"
+fi
+
+if ! mount -t devtmpfs dev /mnt/dev; then
+    handle_error "Failed to mount devtmpfs on /mnt/dev"
+fi
+if ! mount -t proc proc /mnt/proc; then
+    handle_error "Failed to mount proc on /mnt/proc"
+fi
+if ! mount -t sysfs sys /mnt/sys; then
+    handle_error "Failed to mount sysfs on /mnt/sys"
+fi
+
+# Copy the resolver configuration
 if ! cp /etc/resolv.conf /mnt/etc/resolv.conf; then
     handle_error "Failed to copy resolv.conf"
 fi
 
-# Chroot into the new system to configure it
+# Configure basic system settings within the chroot environment
+echo "Configuring basic system settings..."
 if ! chroot /mnt /bin/bash <<EOF; then
     handle_error "Failed to chroot into /mnt"
 EOF
@@ -116,7 +123,28 @@ echo "voidlinux" > /etc/hostname
 # Configure network (example: DHCP)
 echo "auto_lo=lo" > /etc/dhcpcd.conf
 echo "noipv4ll" >> /etc/dhcpcd.conf
+EOF
 
+# Set root password and create user account within the chroot environment
+echo "Setting root password..."
+if ! chroot /mnt /bin/bash -c "passwd"; then
+    handle_error "Failed to set root password"
+fi
+
+read -p "Enter username: " USERNAME
+echo "Creating user account $USERNAME..."
+if ! chroot /mnt /bin/bash -c "useradd -m -G wheel -s /bin/bash $USERNAME"; then
+    handle_error "Failed to create user account"
+fi
+if ! chroot /mnt /bin/bash -c "passwd $USERNAME"; then
+    handle_error "Failed to set password for $USERNAME"
+fi
+
+# Install and configure additional packages within the chroot environment
+echo "Installing and configuring additional packages..."
+if ! chroot /mnt /bin/bash <<EOF; then
+    handle_error "Failed to chroot into /mnt"
+EOF
 # Install Limine bootloader
 if ! xbps-install -S limine; then
     handle_error "Failed to install limine"
@@ -135,25 +163,7 @@ echo "KERNEL=\"\\[ \\\\\$kernel \\\\\\]\"" > /etc/mkinitfs.conf.d/zram.conf
 echo "MODULES=\"zram\"" >> /etc/mkinitfs.conf.d/zram.conf
 echo "zram" >> /etc/mkinitfs.conf.d/zram.conf
 
-# Configure zram swap
-echo "Configuring zram swap..."
-echo "zram" >> /etc/mkinitfs.conf.d/zram.conf
-echo "zram" >> /etc/mkinitfs.conf.d/zram.conf
-
 # Install additional packages (example: NVIDIA drivers, AI tools, gaming tools)
-if [ "$LIBC" = "musl" ]; then
-    # Check if NVIDIA drivers are available for musl
-    # If not available, install glibc version or skip
-    if ! xbps-install -S nvidia nvidia-libs nvidia-utils; then
-        echo "NVIDIA drivers not available for musl or failed to install" 1>&2
-    fi
-else
-    if ! xbps-install -S nvidia nvidia-libs nvidia-utils; then
-        echo "Failed to install NVIDIA drivers" 1>&2
-    fi
-fi
-
-# Install packages for AI and gaming
 echo "Installing packages for AI and gaming..."
 if ! xbps-install -S python3 python3-pip jupyter tensorflow pytorch steam wine; then
     echo "Failed to install some AI and gaming packages" 1>&2
@@ -175,7 +185,18 @@ fi
 if ! bcachefs subvolume snapshot / /snapshots/initial; then
     handle_error "Failed to create initial snapshot"
 fi
-
 EOF
+
+# Unmount the chroot environment
+echo "Unmounting chroot environment..."
+if ! umount /mnt/dev; then
+    handle_error "Failed to unmount /mnt/dev"
+fi
+if ! umount /mnt/proc; then
+    handle_error "Failed to unmount /mnt/proc"
+fi
+if ! umount /mnt/sys; then
+    handle_error "Failed to unmount /mnt/sys"
+fi
 
 echo "Installation complete!"
