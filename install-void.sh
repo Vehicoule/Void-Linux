@@ -97,6 +97,12 @@ cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ || true
 export XBPS_ARCH="$ARCH"
 xbps-install -S -r /mnt -R "$REPO" base-system
 
+# Install xtools and enable all repos
+xbps-install -Sy xtools void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
+
+# Update and sync
+xbps-install -Syu
+
 # Kernel, firmware, headers, initramfs, filesystem tools, bootloader, essentials
 xbps-install -S -r /mnt -R "$REPO" \
   linux linux-headers linux-firmware dracut bcachefs-tools cryptsetup limine xtools \
