@@ -106,8 +106,7 @@ xbps-install -S -r /mnt -R "$REPO" \
   git curl wget neovim htop tmux \
   python3 python3-pip python3-virtualenv \
   zramen \
-  vulkan-loader vulkan-validationlayers mesa-vulkan-icd \
-  nvidia nvidia-libs nvidia-opencl
+  vulkan-loader nvidia nvidia-libs nvidia-libs-32bit nvidia-opencl
 
 # ================== fstab ==================
 xgenfstab -U /mnt > /mnt/etc/fstab
