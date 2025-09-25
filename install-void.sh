@@ -75,16 +75,14 @@ if ! mount ${SSD_DEVICE}1 /mnt/boot/efi; then
     handle_error "Failed to mount ESP"
 fi
 
-# Update repository data
-echo "Updating repository data..."
-if ! xbps-install -S; then
-    handle_error "Failed to update repository data"
+# Download and extract the ROOTFS tarball
+echo "Downloading and extracting ROOTFS tarball..."
+ROOTFS_URL="https://alpha.de.repo.voidlinux.org/live/current/void-x86_64-ROOTFS.tar.xz"
+if ! wget ${ROOTFS_URL} -O /tmp/void-x86_64-ROOTFS.tar.xz; then
+    handle_error "Failed to download ROOTFS tarball"
 fi
-
-# Install the base system
-echo "Installing base system..."
-if ! xbps-install -r /mnt base-system; then
-    handle_error "Failed to install base-system"
+if ! tar xvf /tmp/void-x86_64-ROOTFS.tar.xz -C /mnt; then
+    handle_error "Failed to extract ROOTFS tarball"
 fi
 
 # Set up the chroot environment
@@ -113,6 +111,20 @@ fi
 if ! cp /etc/resolv.conf /mnt/etc/resolv.conf; then
     handle_error "Failed to copy resolv.conf"
 fi
+
+# Update the package manager and install base-system
+echo "Updating package manager and installing base-system..."
+if ! chroot /mnt /bin/bash <<EOF; then
+    handle_error "Failed to chroot into /mnt"
+EOF
+# Update xbps
+xbps-install -Su xbps
+xbps-install -u
+# Install base-system
+xbps-install base-system
+# Remove base-container-full if present
+xbps-remove -R base-container-full
+EOF
 
 # Configure basic system settings within the chroot environment
 echo "Configuring basic system settings..."
