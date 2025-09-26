@@ -1,220 +1,187 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# Interactive Void Linux installer for UEFI, bcachefs (encrypted), Limine, zram, NVIDIA/AI/Gaming.
-# Tested assumptions: Void live ISO, x86_64 glibc, UEFI system, single target disk wiped.
-# Warning: This will DESTROY all data on the target disk.
+# Enhanced Void Linux installer: UEFI, LUKS-encrypted root, Limine, multiple kernels, doas, zram
+# Assumptions: Void live ISO, x86_64 glibc, UEFI, single target disk
 
 ### Helper functions ###
-prompt() { read -r -p "$1" REPLY_VAR; echo "$REPLY_VAR"; }
+prompt() { read -r -p "$1 " REPLY; echo "$REPLY"; }
 die() { echo "Error: $1" >&2; exit 1; }
-require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
-### Check environment ###
-for c in lsblk sgdisk mkfs.vfat mkfs.bcachefs mount umount xbps-install xbps-query ; do
-  require_cmd "$c"
+### Verify environment and dependencies ###
+for cmd in lsblk sgdisk mkfs.vfat mkfs.bcachefs mount xbps-install cryptsetup blkid xchroot; do
+    require_cmd "$cmd"
 done
+[ -d /sys/firmware/efi ] || die "Boot in UEFI mode"
 
-[ -d /sys/firmware/efi ] || die "UEFI firmware not detected. Please boot the live ISO in UEFI mode."
-
-echo "=== Void Linux Installer (bcachefs encrypted + Limine + zram) ==="
-echo "This will ERASE the selected disk and install Void with an encrypted bcachefs root."
+echo "=== Enhanced Void Linux Installer ==="
+echo "WARNING: This will DESTROY all data on the target disk!"
 echo
 
-TARGET_DISK="$(prompt "Enter target disk (e.g., /dev/nvme0n1 or /dev/sda): ")"
+### Get user input ###
+TARGET_DISK="$(prompt "Enter target disk (e.g., /dev/sda):")"
 [ -b "$TARGET_DISK" ] || die "Not a block device: $TARGET_DISK"
 
-echo "Selected disk:"
+echo "Disk info:"
 lsblk -dpno NAME,SIZE,MODEL "$TARGET_DISK"
-CONFIRM="$(prompt "Type YES to confirm erasing $TARGET_DISK: ")"
-[ "$CONFIRM" = "YES" ] || die "Installation aborted."
 
-HOSTNAME="$(prompt "Enter hostname (e.g., voidbox): ")"
-TZ="$(prompt "Enter timezone (e.g., Europe/Paris): ")"
-CREATE_USER="$(prompt "Create a user? Enter username or leave blank to skip: ")"
+CONFIRM="$(prompt "Type YES to confirm erasing $TARGET_DISK:")"
+[ "$CONFIRM" = "YES" ] || die "Aborted"
 
-INSTALL_STEAM="$(prompt "Install Steam and Wine (y/N)? ")"
-INSTALL_CUDA="$(prompt "Install CUDA toolkit for AI (y/N)? ")"
+HOSTNAME="$(prompt "Enter hostname:")"
+ROOT_PASS="$(prompt "Enter LUKS encryption passphrase:")"
+USERNAME="$(prompt "Create user (leave blank for root only):")"
 
-echo "Partitioning $TARGET_DISK (GPT: 1GiB EFI, rest bcachefs)..."
+### Partitioning ###
+echo "Creating partitions..."
 sgdisk --zap-all "$TARGET_DISK"
-sgdisk -n 1:0:+1GiB -t 1:EF00 -c 1:"EFI System Partition" "$TARGET_DISK"
-sgdisk -n 2:0:0      -t 2:8300 -c 2:"Void bcachefs root" "$TARGET_DISK"
+sgdisk -n 1:0:+1G -t 1:EF00 -c 1:EFI "$TARGET_DISK"
+sgdisk -n 2:0:0 -t 2:8300 -c 2:root "$TARGET_DISK"
 partprobe "$TARGET_DISK"
 
-# Resolve partition paths
+# Set partition variables
 if [[ "$TARGET_DISK" =~ nvme ]]; then
-  ESP="${TARGET_DISK}p1"
-  ROOTP="${TARGET_DISK}p2"
+    BOOT_PART="${TARGET_DISK}p1"
+    ROOT_PART="${TARGET_DISK}p2"
 else
-  ESP="${TARGET_DISK}1"
-  ROOTP="${TARGET_DISK}2"
+    BOOT_PART="${TARGET_DISK}1"
+    ROOT_PART="${TARGET_DISK}2"
 fi
 
-echo "Formatting EFI partition (FAT32)..."
-mkfs.vfat -F32 -n EFI "$ESP"
+### Format partitions ###
+echo "Formatting boot partition..."
+mkfs.vfat -F32 -n BOOT "$BOOT_PART"
 
-echo "Formatting bcachefs (encrypted) on $ROOTP..."
-# You will be prompted for a passphrase; remember it for boot.
-# Adjust options as desired (compression, etc.). We choose zstd compression.
-mkfs.bcachefs --encrypted --compression=zstd --label rootfs "$ROOTP"
+echo "Setting up LUKS encryption..."
+echo -n "$ROOT_PASS" | cryptsetup luksFormat --type luks1 "$ROOT_PART" -
+echo -n "$ROOT_PASS" | cryptsetup luksOpen "$ROOT_PART" cryptroot -
 
+echo "Creating bcachefs filesystem..."
+mkfs.bcachefs -L voidroot /dev/mapper/cryptroot
+
+### Mount filesystems ###
 echo "Mounting filesystems..."
-mkdir -p /mnt
-mount -t bcachefs -o compress /dev/disk/by-label/rootfs /mnt
-mkdir -p /mnt/boot/efi
-mount "$ESP" /mnt/boot/efi
+mount /dev/mapper/cryptroot /mnt
+mkdir -p /mnt/boot
+mount "$BOOT_PART" /mnt/boot
 
-echo "Setting up XBPS keys..."
-mkdir -p /mnt/var/db/xbps/keys
-cp -a /var/db/xbps/keys/* /mnt/var/db/xbps/keys/
+### Bootstrap system ###
+echo "Bootstrapping Void Linux..."
+xbps-install -Sy -R https://repo-default.voidlinux.org/current -r /mnt \
+    base-system bcachefs-tools cryptsetup
 
-# Choose repo and arch for bootstrap
-REPO="https://repo-default.voidlinux.org/current"
-ARCH="x86_64"
-
-echo "Bootstrapping base-system (glibc, $ARCH)..."
-XBPS_ARCH="$ARCH" xbps-install -Sy -R "$REPO" -r /mnt base-system
-
-echo "Generating fstab..."
-# xtools/xgenfstab may not be present on live; if available, use it; otherwise generate basic fstab.
-if command -v xgenfstab >/dev/null 2>&1; then
-  xgenfstab -U /mnt > /mnt/etc/fstab
-else
-  ROOT_UUID="$(blkid -s UUID -o value "$ROOTP")"
-  ESP_UUID="$(blkid -s UUID -o value "$ESP")"
-  cat > /mnt/etc/fstab <<EOF
-# /etc/fstab
-UUID=${ROOT_UUID}  /          bcachefs  defaults,compress  0 1
-UUID=${ESP_UUID}   /boot/efi  vfat      umask=0077         0 2
-EOF
-fi
-
-echo "Configuring basic system files..."
+### Basic system configuration ###
+echo "Configuring system..."
 echo "$HOSTNAME" > /mnt/etc/hostname
 
-# rc.conf minimal network via dhcpcd
-cat > /mnt/etc/rc.conf <<'EOF'
-# Minimal rc.conf for Void (runit)
-HOSTNAME="$(cat /etc/hostname)"
-EOF
+### Chroot setup ###
+echo "Entering chroot..."
+xchroot /mnt /bin/bash << 'EOF'
+set -e
 
-# Locale (glibc)
-if [ -f /mnt/etc/default/libc-locales ]; then
-  sed -i 's/^# \(en_US.UTF-8 UTF-8\)/\1/' /mnt/etc/default/libc-locales
-fi
+# Configure repositories (current + nonfree for microcode)
+mkdir -p /etc/xbps.d
+cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
 
-echo "Entering chroot to configure system..."
-mount -t proc none /mnt/proc
-mount -t sysfs none /mnt/sys
-mount -o bind /dev /mnt/dev
-mount -o bind /run /mnt/run
-chroot /mnt /bin/bash -e <<'CHROOT_EOF'
-set -euo pipefail
-
-# Update xbps itself and base
+# Install essential packages with both kernels and microcode
 xbps-install -Sy xbps
 xbps-install -yu
 
-# Core packages: kernel, headers, microcode, dracut, bcachefs tools
-xbps-install -y linux linux-headers dracut bcachefs-tools intel-ucode
+# Install kernels, firmware, and microcode
+xbps-install -y linux linux-mainline linux-firmware intel-ucode
 
-# Networking and SSH (optional but handy)
-xbps-install -y dhcpcd-openrc || true
-xbps-install -y dhcpcd || true
-xbps-install -y openssh
+# Install system utilities
+xbps-install -y opendoas zramen limine efibootmgr
 
-# Locale reconfigure (glibc)
-if [ -f /etc/default/libc-locales ]; then
-  xbps-reconfigure -f glibc-locales
-fi
+# Configure doas (replace sudo)
+cat > /etc/doas.conf << 'DOAS_EOF'
+permit persist :wheel
+DOAS_EOF
+chmod 0400 /etc/doas.conf
 
-# Timezone
-ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
+# Remove sudo if present
+xbps-remove -y sudo 2>/dev/null || true
 
-# Runit services enable
-ln -sf /etc/sv/dhcpcd /var/service/dhcpcd || true
-ln -sf /etc/sv/sshd    /var/service/sshd    || true
-
-# zram swap via zramen service
-xbps-install -y zramen
-# Configure zram: size equals RAM, can adjust via conf file
-mkdir -p /etc
-cat > /etc/zramen.conf <<'EOF_ZRAM'
-# zramen.conf - simple zram swap config
-# Size in bytes or with suffix; here use 100% of RAM
+# Configure zram
+cat > /etc/zramen.conf << 'ZRAM_EOF'
 SIZE=ram
 NUM_DEVICES=1
 COMPRESSION_ALGO=zstd
 PRIORITY=100
-EOF_ZRAM
-ln -sf /etc/sv/zramen /var/service/zramen
+ZRAM_EOF
 
-# NVIDIA (RTX 3070) proprietary driver + vulkan
-xbps-install -y nvidia nvidia-libs
-# Optional Vulkan tools
-xbps-install -y vulkan-loader vulkan-tools
+# Enable zram service
+ln -sf /etc/sv/zramen /var/service/ 2>/dev/null || true
 
-# CUDA toolkit (optional)
-# Uncomment if requested outside chroot block.
-CHROOT_EOF
-
-# Optional CUDA and gaming installs outside chroot decision
-if [[ "${INSTALL_CUDA,,}" == "y" ]]; then
-  chroot /mnt xbps-install -y cuda
-fi
-if [[ "${INSTALL_STEAM,,}" == "y" ]]; then
-  chroot /mnt xbps-install -y steam wine winetricks
-fi
-
-# User creation and passwords
-echo "Set root password:"
-chroot /mnt passwd
-if [ -n "$CREATE_USER" ]; then
-  chroot /mnt useradd -m -G wheel,video,audio,input "$CREATE_USER"
-  echo "Set password for $CREATE_USER:"
-  chroot /mnt passwd "$CREATE_USER"
-  # sudo setup
-  chroot /mnt xbps-install -y sudo
-  chroot /mnt sh -c 'echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/10-wheel'
-fi
-
-echo "Configuring dracut to include bcachefs and ask for encryption passphrase..."
-mkdir -p /mnt/etc/dracut.conf.d
-cat > /mnt/etc/dracut.conf.d/10-bcachefs.conf <<'EOF'
-# Ensure bcachefs filesystem support in initramfs
+# Configure dracut for LUKS and both kernels
+cat > /etc/dracut.conf.d/90-crypt.conf << 'DRACUT_EOF'
+add_dracutmodules+=" crypt "
 filesystems+=" bcachefs "
-# Optional: add hostonly="no" to be safer across kernels
-EOF
+omit_dracutmodules+=" nvdimm fs-lib "
+early_microcode=yes
+DRACUT_EOF
 
-echo "Installing Limine bootloader..."
-chroot /mnt xbps-install -y limine efibootmgr
+# Generate initramfs for both kernels
+for kver in /usr/lib/modules/*; do
+    if [ -d "$kver" ]; then
+        kver=$(basename "$kver")
+        dracut --force --kver "$kver"
+    fi
+done
 
-# Create simple limine.cfg
-KVER="$(chroot /mnt bash -c 'ls /boot/vmlinuz-* | sed "s|.*/vmlinuz-||"')"
-INITRD="$(chroot /mnt bash -c 'ls /boot/initramfs-* | sed "s|.*/initramfs-||"')"
-cat > /mnt/boot/limine.cfg <<EOF
-TIMEOUT=3
-DEFAULT_ENTRY=Void Linux
+# Install Limine bootloader
+limine-install /boot
 
-ENTRY=Void Linux
+# Get partition UUIDs for boot configuration
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+LUKS_UUID=$(blkid -s UUID -o value /dev/mapper/cryptroot)
+
+# Create Limine configuration with both kernel options
+cat > /boot/limine.cfg << 'LIMINE_EOF'
+TIMEOUT=5
+DEFAULT_ENTRY=void-linux-mainline
+
+:Void Linux (Mainline)
     PROTOCOL=linux
-    KERNEL_PATH=boot://vmlinuz-${KVER}
-    MODULE_PATH=boot://initramfs-${INITRD}
-    CMDLINE=root=UUID=$(blkid -s UUID -o value "$ROOTP") rootfstype=bcachefs rw quiet
+    KERNEL_PATH=boot:///vmlinuz-linux-mainline
+    MODULE_PATH=boot:///initramfs-linux-mainline.img
+    CMDLINE=rd.luks.uuid=$ROOT_UUID root=/dev/mapper/cryptroot rootfstype=bcachefs rw
+
+:Void Linux (Current)
+    PROTOCOL=linux
+    KERNEL_PATH=boot:///vmlinuz-linux
+    MODULE_PATH=boot:///initramfs-linux.img
+    CMDLINE=rd.luks.uuid=$ROOT_UUID root=/dev/mapper/cryptroot rootfstype=bcachefs rw
+LIMINE_EOF
+
+# Set root password
+echo "Setting root password:"
+passwd
+
+# Create user if requested
+if [ -n "$USERNAME" ]; then
+    useradd -m -G wheel,audio,video "$USERNAME"
+    echo "Setting password for $USERNAME:"
+    passwd "$USERNAME"
+fi
+
+# Final system configuration
+xbps-reconfigure -fa
 EOF
 
-# Ensure kernel/initramfs paths exist and match limine cfg
-# (Void uses versioned files; limine.cfg references them directly)
-
-echo "Install Limine to the ESP..."
-# Limine copies EFI file and sets up boot entry
-chroot /mnt limine-install /boot/efi
-
-echo "Regenerate initramfs and finalize configuration..."
-chroot /mnt xbps-reconfigure -fa
-
-echo "Unmounting and rebooting..."
+### Cleanup ###
+echo "Unmounting filesystems..."
 umount -R /mnt || true
-sync
-echo "Installation complete. Remove the live media and reboot."
+cryptsetup luksClose cryptroot || true
+
+echo "Installation complete!"
+echo "System features:"
+echo "✓ LUKS-encrypted root with bcachefs"
+echo "✓ Both current and mainline kernels"
+echo "✓ Intel microcode updates"
+echo "✓ Doas instead of sudo"
+echo "✓ Zram compression"
+echo "✓ Limine bootloader"
+echo ""
+echo "Reboot and remove installation media."
+echo "Use 'doas' instead of 'sudo' for privilege escalation."
