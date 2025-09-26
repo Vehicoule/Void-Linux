@@ -273,7 +273,7 @@ set -euo pipefail
 xbps-install -Syu
 xbps-install -u xbps
 xbps-install -Syu void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
-xbps-install -Syu xtools opendoas sudo git curl wget NetworkManager dbus dracut intel-ucode
+xbps-install -Syu xtools opendoas sudo zsh git curl wget NetworkManager dbus dracut intel-ucode
 xbps-install -Syu
 
 # Kernels
@@ -308,9 +308,14 @@ echo "permit nopass :wheel" > /etc/doas.conf
 chmod 0400 /etc/doas.conf
 
 # User
-useradd -m -G wheel,network -s /bin/bash USERNAME
-echo "USERNAME:USER_PASSWORD" | chpasswd
-echo "root:ROOT_PASSWORD" | chpasswd
+# Create the user
+useradd -m -G wheel,users,network,audio,video-s /bin/zsh "$USERNAME"
+
+# Set the user's password
+echo "$USERNAME:$USER_PASSWORD" | chpasswd
+
+# Set the root password
+echo "root:$ROOT_PASSWORD" | chpasswd
 
 # Enable services (runit)
 mkdir -p /var/service
