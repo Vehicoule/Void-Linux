@@ -261,7 +261,9 @@ setup_partitions() {
   [[ "$LVM_CHOICE" == "2" && "$SWAP_CHOICE" == "2" ]] && swapon "$SWAP_DEV" || true
 
   for d in proc sys dev; do
-    mount --rbind "/$d" "/mnt/$d"; mount --make-rslave "/mnt/$d"
+    mkdir -p "/mnt/$d"
+    mount --rbind "/$d" "/mnt/$d"
+    mount --make-rslave "/mnt/$d"
   done
 
   log_success "Partitioning and mounting complete"
@@ -369,89 +371,70 @@ build_cmdline() {
 # Limine bootloader with snapshots
 # ==============================
 install_limine() {
-  log_info "Installing Limine"
-  xbps-install -y -r /mnt limine
+  log_info "Installing Limine bootloader with auto‑generated menu"
 
-  # Create limine.conf with entries for current kernels and btrfs snapshots
-  cat > /mnt/boot/limine.conf <<EOF
-timeout: 5
-verbose: yes
-
-# Entries will be appended below
-EOF
-
-  # Append entries for kernels present
-  xchroot /mnt /bin/bash <<EOF
+  xchroot /mnt /bin/bash <<'EOF'
 set -euo pipefail
-ROOT_UUID="$(blkid -s UUID -o value "${ROOT_DEV}")"
 
-for kern in /boot/vmlinuz*; do
-  [ -e "\$kern" ] || continue
-  base=\$(basename "\$kern")
-  initrd=\$(ls /boot/initramfs* | grep "\${base#vmlinuz-}" | head -n1 || true)
+xbps-install -y limine efibootmgr
 
-  cat >> /boot/limine.conf <<EOT
-/ Void Linux (\$base)
-protocol: linux
-path: boot():/\$base
-EOT
+# Ensure /boot/limine.conf exists
+: > /boot/limine.conf
+echo "TIMEOUT=5" >> /boot/limine.conf
+echo "DEFAULT_ENTRY=Void Linux" >> /boot/limine.conf
+echo "" >> /boot/limine.conf
 
-  if [ -n "\$initrd" ]; then
-    echo "module_path: boot():/\$initrd" >> /boot/limine.conf
-  fi
+ROOT_UUID=$(blkid -s UUID -o value "$(findmnt -no SOURCE /)")
 
-  echo "cmdline: root=UUID=\$ROOT_UUID rw ${ROOT_FS == "btrfs" ? "rootflags=subvol=@" : ""} ${KERNEL_CMDLINE#*quiet}" >> /boot/limine.conf
+# Generate entries for each kernel/initramfs
+for kern in /boot/vmlinuz-*; do
+  [ -e "$kern" ] || continue
+  base=$(basename "$kern")
+  initrd=$(ls /boot/initramfs-* | grep "${base#vmlinuz-}" | head -n1 || true)
+
+  echo ":Void Linux ($base)" >> /boot/limine.conf
+  echo "PROTOCOL=linux" >> /boot/limine.conf
+  echo "KERNEL_PATH=/boot/$base" >> /boot/limine.conf
+  [ -n "$initrd" ] && echo "INITRD_PATH=/boot/$(basename "$initrd")" >> /boot/limine.conf
+  echo "CMDLINE=root=UUID=$ROOT_UUID rw rootflags=subvol=@ quiet" >> /boot/limine.conf
+  echo "" >> /boot/limine.conf
 done
 
-# Snapshot entries for btrfs subvols
-if [ -d /.snapshots ] && btrfs subvolume list / >/dev/null 2>&1; then
-  for snap in \$(find /.snapshots -maxdepth 2 -type d -name snapshot | sort -r); do
-    subvol=\${snap#/}      # strip leading /
-    name=\$(basename \$(dirname "\$snap"))
-    for kern in /boot/vmlinuz*; do
-      base=\$(basename "\$kern")
-      initrd=\$(ls /boot/initramfs* | grep "\${base#vmlinuz-}" | head -n1 || true)
+# Add snapshot entries if btrfs snapshots exist
+if [ -d /.snapshots ]; then
+  for snap in $(find /.snapshots -maxdepth 2 -type d -name snapshot | sort -r); do
+    subvol=${snap#/}   # strip leading /
+    name=$(basename "$(dirname "$snap")")
 
-      cat >> /boot/limine.conf <<EOT
-/ Snapshot \$name (\$base)
-protocol: linux
-path: boot():/\$base
-EOT
+    for kern in /boot/vmlinuz-*; do
+      base=$(basename "$kern")
+      initrd=$(ls /boot/initramfs-* | grep "${base#vmlinuz-}" | head -n1 || true)
 
-      if [ -n "\$initrd" ]; then
-        echo "module_path: boot():/\$initrd" >> /boot/limine.conf
-      fi
-      echo "cmdline: root=UUID=\$ROOT_UUID rw rootflags=subvol=\$subvol ${KERNEL_CMDLINE#*quiet}" >> /boot/limine.conf
+      echo ":Snapshot $name ($base)" >> /boot/limine.conf
+      echo "PROTOCOL=linux" >> /boot/limine.conf
+      echo "KERNEL_PATH=/boot/$base" >> /boot/limine.conf
+      [ -n "$initrd" ] && echo "INITRD_PATH=/boot/$(basename "$initrd")" >> /boot/limine.conf
+      echo "CMDLINE=root=UUID=$ROOT_UUID rw rootflags=subvol=$subvol quiet" >> /boot/limine.conf
+      echo "" >> /boot/limine.conf
     done
   done
 fi
+
+# UEFI setup
+if [ -d /sys/firmware/efi ]; then
+  mkdir -p /boot/EFI/BOOT /boot/EFI/limine
+  cp /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI
+  cp /boot/limine.conf /boot/EFI/limine/limine.conf
+  efibootmgr --create --disk /dev/${TARGET_DISK} --part 1 \
+    --label "Void (Limine)" --loader '\EFI\BOOT\BOOTX64.EFI' || true
+else
+  # BIOS setup
+  cp /usr/share/limine/limine-bios.sys /boot/
+  dd if=/usr/share/limine/limine-bios.mbr of=/dev/${TARGET_DISK} bs=440 count=1 conv=notrunc
+fi
 EOF
 
-  # UEFI: copy EFI binary and run limine-install on the ESP
-  if [[ "$FIRMWARE" == "UEFI" ]]; then
-    mkdir -p /mnt/boot/EFI/BOOT 
-    mkdir -p /mnt/boot/EFI/limine
-    cp /mnt/usr/share/limine/BOOTX64.EFI /mnt/boot/EFI/BOOT/BOOTX64.EFI
-    cp /mnt/boot/limine.conf /mnt/boot/EFI/limine/
-    xchroot /mnt limine-install /boot
-    # Try to add NVRAM entry (optional)
-    local disk="/dev/$TARGET_DISK"
-    local partnum
-    if [[ "$BOOT" =~ ${TARGET_DISK}p([0-9]+)$ ]]; then
-      partnum="${BASH_REMATCH[1]}"
-    elif [[ "$BOOT" =~ ${TARGET_DISK}([0-9]+)$ ]]; then
-      partnum="${BASH_REMATCH[1]}"
-    else
-      partnum="1"
-    fi
-    efibootmgr --create --disk "$disk" --part "$partnum" --label "Void (Limine)" --loader '\EFI\BOOT\BOOTX64.EFI' || true
-  else
-    # BIOS: ensure limine-bios.sys present and install to disk MBR
-    cp /mnt/usr/share/limine/limine-bios.sys /mnt/boot/
-    xchroot /mnt limine-install "/dev/$TARGET_DISK"
-  fi
-
-  log_success "Limine installed with snapshot entries"
+  log_success "Limine installed with kernel and snapshot entries"
 }
 
 # ==============================
