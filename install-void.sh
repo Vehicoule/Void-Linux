@@ -151,7 +151,6 @@ done
 # Limine (UEFI) install: copy EFI loader and limine.sys, create boot entry
 mkdir -p /boot/EFI/BOOT /boot/limine
 cp -f /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI
-cp -f /usr/share/limine/limine.sys /boot/limine/limine.sys
 
 # Build Limine configuration dynamically for all kernels
 cat > /boot/limine.cfg <<EOF_CFG
