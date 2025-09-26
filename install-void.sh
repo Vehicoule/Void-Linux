@@ -310,7 +310,7 @@ xbps-install -y linux-firmware
 
 # NVIDIA if selected
 if [ "${GPU_CHOICE}" = "1" ] || [ "${GPU_CHOICE}" = "2" ]; then
-  xbps-install -y nvidia nvidia-tools nvidia-dkms
+  xbps-install -y nvidia nvidia-libs nvidia-libs-32bit nvidia-opencl nvidia-dkms dkms
 fi
 
 # Timezone, locale, keymap, hostname
