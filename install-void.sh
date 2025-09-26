@@ -272,8 +272,8 @@ set -euo pipefail
 # Update and repos
 xbps-install -Syu
 xbps-install -u xbps
-xbps-install -Syu
-xbps-install -Syu xtools opendoas sudo git curl wget NetworkManager dbus dracut intel-ucode void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
+xbps-install -Syu void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
+xbps-install -Syu xtools opendoas sudo git curl wget NetworkManager dbus dracut intel-ucode
 xbps-install -Syu
 
 # Kernels
