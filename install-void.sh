@@ -289,25 +289,36 @@ if [ "GPU_CHOICE" = "1" ] || [ "GPU_CHOICE" = "2" ]; then
 fi
 
 # Timezone, locale, keymap, hostname
-ln -sf /usr/share/zoneinfo/TIMEZONE /etc/localtime
-hwclock --systohc
-echo "LOCALE UTF-8" >> /etc/default/libc-locales
-echo "LANG=LOCALE" > /etc/locale.conf
-xbps-reconfigure -f glibc-locales
-echo "KEYMAP=KEYMAP" > /etc/vconsole.conf
-echo "HOSTNAME" > /etc/hostname
 
-cat > /etc/hosts <<H
+# Timezone
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+hwclock --systohc
+
+# Locales
+echo "$LOCALE UTF-8" >> /etc/default/libc-locales
+xbps-reconfigure -f glibc-locales
+echo "LANG=$LOCALE" > /etc/locale.conf
+
+# Keymap
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+
+# Hostname
+echo "$HOSTNAME" > /etc/hostname
+
+# Hosts file
+cat > /etc/hosts <<EOF
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   HOSTNAME.localdomain HOSTNAME
-H
+127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+EOF
+
 
 # doas
 echo "permit nopass :wheel" > /etc/doas.conf
 chmod 0400 /etc/doas.conf
 
 # User
+
 # Create the user
 useradd -m -G wheel,users,network,audio,video-s /bin/zsh "$USERNAME"
 
