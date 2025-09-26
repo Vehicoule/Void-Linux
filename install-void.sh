@@ -36,7 +36,7 @@ bootstrap_deps() {
   done
   ((${#to_install[@]})) && xbps-install -y "${to_install[@]}"
 
-  local required=(xchroot lsblk parted mkfs.fat mkfs.ext4 mkfs.xfs mkfs.btrfs mkfs.bcachefs efibootmgr limine-install)
+  local required=(xchroot lsblk parted mkfs.fat mkfs.ext4 mkfs.xfs mkfs.btrfs mkfs.bcachefs efibootmgr)
   for cmd in "${required[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || { log_error "Missing command: $cmd"; exit 1; }
   done
@@ -429,7 +429,8 @@ EOF
 
   # UEFI: copy EFI binary and run limine-install on the ESP
   if [[ "$FIRMWARE" == "UEFI" ]]; then
-    mkdir -p /mnt/boot/EFI/BOOT /mnt/boot/EFI/limine
+    mkdir -p /mnt/boot/EFI/BOOT 
+    mkdir -p /mnt/boot/EFI/limine
     cp /mnt/usr/share/limine/BOOTX64.EFI /mnt/boot/EFI/BOOT/BOOTX64.EFI
     cp /mnt/boot/limine.conf /mnt/boot/EFI/limine/
     xchroot /mnt limine-install /boot
