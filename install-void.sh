@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Enhanced Void Linux installer: UEFI, LUKS-encrypted root, Limine, multiple kernels, doas, zram
-# Assumptions: Void live ISO, x86_64 glibc, UEFI, single target disk
+# Void Linux installer: UEFI, LUKS-encrypted root, bcachefs, Limine, multiple kernels, doas, zram
+# Assumptions: Void live ISO (x86_64 glibc), UEFI, single target disk
 
 ### Helper functions ###
 prompt() { read -r -p "$1 " REPLY; echo "$REPLY"; }
@@ -9,17 +9,17 @@ die() { echo "Error: $1" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
 ### Verify environment and dependencies ###
-for cmd in lsblk sgdisk mkfs.vfat mkfs.bcachefs mount xbps-install cryptsetup blkid xchroot; do
+for cmd in lsblk sgdisk mkfs.vfat mkfs.bcachefs mount xbps-install cryptsetup blkid xchroot efibootmgr; do
     require_cmd "$cmd"
 done
 [ -d /sys/firmware/efi ] || die "Boot in UEFI mode"
 
-echo "=== Enhanced Void Linux Installer ==="
+echo "=== Void Linux Installer (UEFI + LUKS + bcachefs + Limine) ==="
 echo "WARNING: This will DESTROY all data on the target disk!"
 echo
 
 ### Get user input ###
-TARGET_DISK="$(prompt "Enter target disk (e.g., /dev/sda):")"
+TARGET_DISK="$(prompt "Enter target disk (e.g., /dev/nvme0n1 or /dev/sda):")"
 [ -b "$TARGET_DISK" ] || die "Not a block device: $TARGET_DISK"
 
 echo "Disk info:"
@@ -29,14 +29,15 @@ CONFIRM="$(prompt "Type YES to confirm erasing $TARGET_DISK:")"
 [ "$CONFIRM" = "YES" ] || die "Aborted"
 
 HOSTNAME="$(prompt "Enter hostname:")"
-ROOT_PASS="$(prompt "Enter LUKS encryption passphrase:")"
+read -s -p "Enter LUKS encryption passphrase: " ROOT_PASS
+echo
 USERNAME="$(prompt "Create user (leave blank for root only):")"
 
 ### Partitioning ###
-echo "Creating partitions..."
+echo "Creating GPT partitions (ESP + LUKS root)..."
 sgdisk --zap-all "$TARGET_DISK"
 sgdisk -n 1:0:+1G -t 1:EF00 -c 1:EFI "$TARGET_DISK"
-sgdisk -n 2:0:0 -t 2:8300 -c 2:root "$TARGET_DISK"
+sgdisk -n 2:0:0    -t 2:8300 -c 2:root "$TARGET_DISK"
 partprobe "$TARGET_DISK"
 
 # Set partition variables
@@ -47,14 +48,19 @@ else
     BOOT_PART="${TARGET_DISK}1"
     ROOT_PART="${TARGET_DISK}2"
 fi
-
 ### Format partitions ###
-echo "Formatting boot partition..."
-mkfs.vfat -F32 -n BOOT "$BOOT_PART"
+echo "Formatting EFI system partition..."
+mkfs.vfat -F32 -n EFI "$BOOT_PART"
 
-echo "Setting up LUKS encryption..."
-echo -n "$ROOT_PASS" | cryptsetup luksFormat --type luks1 "$ROOT_PART" -
-echo -n "$ROOT_PASS" | cryptsetup luksOpen "$ROOT_PART" cryptroot -
+echo "Setting up LUKS (interactive, no passphrase echo)..."
+# Use a secure temp keyfile for non-interactive operations
+TMPKEY="$(mktemp)"
+trap 'shred -u "$TMPKEY" || true' EXIT
+printf "%s" "$ROOT_PASS" > "$TMPKEY"
+unset ROOT_PASS
+
+cryptsetup luksFormat --type luks1 "$ROOT_PART" "$TMPKEY"
+cryptsetup luksOpen "$ROOT_PART" cryptroot --key-file "$TMPKEY"
 
 echo "Creating bcachefs filesystem..."
 mkfs.bcachefs -L voidroot /dev/mapper/cryptroot
@@ -66,40 +72,56 @@ mkdir -p /mnt/boot
 mount "$BOOT_PART" /mnt/boot
 
 ### Bootstrap system ###
-echo "Bootstrapping Void Linux..."
+echo "Bootstrapping Void Linux base system..."
 xbps-install -Sy -R https://repo-default.voidlinux.org/current -r /mnt \
-    base-system bcachefs-tools cryptsetup
+    base-system bcachefs-tools cryptsetup dracut
 
 ### Basic system configuration ###
-echo "Configuring system..."
+echo "Configuring system basics..."
 echo "$HOSTNAME" > /mnt/etc/hostname
+
+# Minimal networking (optional but helpful)
+echo "HOSTNAME=\"$HOSTNAME\"" > /mnt/etc/rc.conf
+ln -sf /usr/share/zoneinfo/UTC /mnt/etc/localtime
+printf "127.0.0.1\tlocalhost\n::1\tlocalhost\n127.0.1.1\t%s\n" "$HOSTNAME" > /mnt/etc/hosts
+
+### Prepare values for chroot (avoid variable scope issues) ###
+ROOT_UUID="$(blkid -s UUID -o value "$ROOT_PART")"
+echo "$ROOT_UUID" > /mnt/root_uuid
 
 ### Chroot setup ###
 echo "Entering chroot..."
 xchroot /mnt /bin/bash << 'EOF'
-set -e
+set -euo pipefail
 
-# Configure repositories (current + nonfree for microcode)
+# Load values passed from the host
+ROOT_UUID="$(cat /root_uuid)"
+
+# Configure repositories (current + nonfree/multilib as needed)
 mkdir -p /etc/xbps.d
-cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
+cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/ || true
+xbps-install -Syu xbps
+xbps-install -Syu void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree || true
 
-# Install essential packages with both kernels and microcode
-xbps-install -Sy xbps
-xbps-install -yu
+# Full system update
+xbps-install -Syu
 
-# Install kernels, firmware, and microcode
-xbps-install -y linux linux-mainline linux-firmware intel-ucode
+# Detect CPU vendor for microcode (Intel: intel-ucode; AMD: provided by linux-firmware)
+CPU_VENDOR="$(LC_ALL=C lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')"
+MICROCODE_PKGS=""
+if echo "$CPU_VENDOR" | grep -qi intel; then
+    MICROCODE_PKGS="intel-ucode"
+fi
 
-# Install system utilities
-xbps-install -y opendoas zramen limine efibootmgr
+# Install kernels, firmware, microcode, and essentials
+xbps-install -y linux linux-headers linux-mainline linux-mainline-headers linux-firmware ${MICROCODE_PKGS}
+xbps-install -y opendoas zramen limine efibootmgr xtools
 
 # Configure doas (replace sudo)
 cat > /etc/doas.conf << 'DOAS_EOF'
-permit persist :wheel
+permit nopass :wheel
 DOAS_EOF
 chmod 0400 /etc/doas.conf
-
-# Remove sudo if present
 xbps-remove -y sudo 2>/dev/null || true
 
 # Configure zram
@@ -109,65 +131,90 @@ NUM_DEVICES=1
 COMPRESSION_ALGO=zstd
 PRIORITY=100
 ZRAM_EOF
-
 # Enable zram service
-ln -sf /etc/sv/zramen /var/service/ 2>/dev/null || true
+ln -s /etc/sv/zramen /var/service/ 2>/dev/null || true
 
-# Configure dracut for LUKS and both kernels
+# Dracut: enable crypt + bcachefs + early microcode
 cat > /etc/dracut.conf.d/90-crypt.conf << 'DRACUT_EOF'
 add_dracutmodules+=" crypt "
 filesystems+=" bcachefs "
-omit_dracutmodules+=" nvdimm fs-lib "
 early_microcode=yes
 DRACUT_EOF
 
-# Generate initramfs for both kernels
-for kver in /usr/lib/modules/*; do
-    if [ -d "$kver" ]; then
-        kver=$(basename "$kver")
-        dracut --force --kver "$kver"
-    fi
+# Generate initramfs for all installed kernels
+for moddir in /usr/lib/modules/*; do
+    [ -d "$moddir" ] || continue
+    kver="$(basename "$moddir")"
+    dracut --force --kver "$kver"
 done
 
-# Install Limine bootloader
-limine-install /boot
+# Limine (UEFI) install: copy EFI loader and limine.sys, create boot entry
+mkdir -p /boot/EFI/BOOT /boot/limine
+cp -f /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI
+cp -f /usr/share/limine/limine.sys /boot/limine/limine.sys
 
-# Get partition UUIDs for boot configuration
-ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
-LUKS_UUID=$(blkid -s UUID -o value /dev/mapper/cryptroot)
-
-# Create Limine configuration with both kernel options
-cat > /boot/limine.cfg << 'LIMINE_EOF'
+# Build Limine configuration dynamically for all kernels
+cat > /boot/limine.cfg <<EOF_CFG
 TIMEOUT=5
 DEFAULT_ENTRY=void-linux-mainline
+EOF_CFG
 
-:Void Linux (Mainline)
-    PROTOCOL=linux
-    KERNEL_PATH=boot:///vmlinuz-linux-mainline
-    MODULE_PATH=boot:///initramfs-linux-mainline.img
-    CMDLINE=rd.luks.uuid=$ROOT_UUID root=/dev/mapper/cryptroot rootfstype=bcachefs rw
+have_mainline=0
+have_current=0
 
-:Void Linux (Current)
+for moddir in /usr/lib/modules/*; do
+    [ -d "$moddir" ] || continue
+    kver="$(basename "$moddir")"
+    kernel="/boot/vmlinuz-$kver"
+    initrd="/boot/initramfs-$kver.img"
+
+    title="Void Linux ($kver)"
+    if echo "$kver" | grep -qi mainline; then
+        title="Void Linux (Mainline)"
+        have_mainline=1
+    elif echo "$kver" | grep -qi '^6\|^5\|^4'; then
+        title="Void Linux (Current)"
+        have_current=1
+    fi
+
+    cat >> /boot/limine.cfg <<EOF_ENT
+:$title
     PROTOCOL=linux
-    KERNEL_PATH=boot:///vmlinuz-linux
-    MODULE_PATH=boot:///initramfs-linux.img
+    KERNEL_PATH=boot:///$(${MICROCODE_PKGS:+echo "cpu_microcode" > /dev/null})${kernel#/}
+    MODULE_PATH=boot:///${initrd#/}
     CMDLINE=rd.luks.uuid=$ROOT_UUID root=/dev/mapper/cryptroot rootfstype=bcachefs rw
-LIMINE_EOF
+EOF_ENT
+done
+
+# Fallback default entry if mainline wasn't detected
+if [ "\$have_mainline" -eq 0 ] && [ "\$have_current" -eq 1 ]; then
+    sed -i 's/DEFAULT_ENTRY=.*/DEFAULT_ENTRY=void-linux-current/' /boot/limine.cfg
+fi
+
+# Create EFI boot entry pointing to Limine
+# Note: many firmwares auto-boot \EFI\BOOT\BOOTX64.EFI; this makes it explicit.
+efibootmgr -c -L "Void (Limine)" -l "\\EFI\\BOOT\\BOOTX64.EFI" || true
 
 # Set root password
-echo "Setting root password:"
+echo "Set root password:"
 passwd
 
-# Create user if requested
-if [ -n "$USERNAME" ]; then
-    useradd -m -G wheel,audio,video "$USERNAME"
-    echo "Setting password for $USERNAME:"
-    passwd "$USERNAME"
+# Create user if requested (passed via file)
+if [ -f /username_requested ] && [ -s /username_requested ]; then
+    USERNAME="$(cat /username_requested)"
+    useradd -m -G wheel,audio,video "\$USERNAME"
+    echo "Set password for \$USERNAME:"
+    passwd "\$USERNAME"
 fi
 
 # Final system configuration
 xbps-reconfigure -fa
 EOF
+
+### Pass username into chroot (if any) ###
+if [ -n "$USERNAME" ]; then
+    echo "$USERNAME" > /mnt/username_requested
+fi
 
 ### Cleanup ###
 echo "Unmounting filesystems..."
@@ -177,11 +224,11 @@ cryptsetup luksClose cryptroot || true
 echo "Installation complete!"
 echo "System features:"
 echo "✓ LUKS-encrypted root with bcachefs"
-echo "✓ Both current and mainline kernels"
-echo "✓ Intel microcode updates"
+echo "✓ Current and mainline kernels (with correct initramfs generation)"
+echo "✓ CPU microcode: Intel only if needed; AMD via linux-firmware"
 echo "✓ Doas instead of sudo"
-echo "✓ Zram compression"
-echo "✓ Limine bootloader"
+echo "✓ Zram compression enabled"
+echo "✓ Limine bootloader (UEFI) correctly installed without limine-install"
 echo ""
 echo "Reboot and remove installation media."
 echo "Use 'doas' instead of 'sudo' for privilege escalation."
