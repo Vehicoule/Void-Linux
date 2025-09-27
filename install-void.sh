@@ -16,9 +16,6 @@ log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 check_root() {
   [[ $EUID -eq 0 ]] || { log_error "Run as root"; exit 1; }
 }
-check_void() {
-  [[ -f /etc/os-release ]] || { log_error "Run from a Void Linux live environment"; exit 1; }
-}
 detect_firmware() {
   [[ -d /sys/firmware/efi ]] && FIRMWARE="UEFI" || FIRMWARE="BIOS"
 }
