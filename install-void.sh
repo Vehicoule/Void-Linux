@@ -314,7 +314,7 @@ if [ "${GPU_CHOICE}" = "1" ] || [ "${GPU_CHOICE}" = "2" ]; then
 fi
 
 # Timezone, locale, keymap, hostname
-ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
+ln -s "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
 hwclock --systohc
 
 echo "${LOCALE} UTF-8" >> /etc/default/libc-locales
@@ -341,9 +341,9 @@ echo "root:${ROOT_PASSWORD}" | chpasswd
 
 # Enable services (runit)
 mkdir -p /var/service
-ln -sf /etc/sv/dbus /var/service/
-ln -sf /etc/sv/NetworkManager /var/service/
-ln -sf /etc/sv/sshd /var/service/
+ln -s /etc/sv/dbus /var/service/
+ln -s /etc/sv/NetworkManager /var/service/
+ln -s /etc/sv/sshd /var/service/
 
 EOF
 
@@ -453,7 +453,7 @@ sed -i 's/TIMELINE_CREATE="no"/TIMELINE_CREATE="yes"/' /etc/snapper/configs/root
 sed -i 's/TIMELINE_LIMIT_DAILY="0"/TIMELINE_LIMIT_DAILY="7"/' /etc/snapper/configs/root || true
 sed -i 's/TIMELINE_LIMIT_WEEKLY="0"/TIMELINE_LIMIT_WEEKLY="4"/' /etc/snapper/configs/root || true
 sed -i 's/TIMELINE_LIMIT_MONTHLY="0"/TIMELINE_LIMIT_MONTHLY="12"/' /etc/snapper/configs/root || true
-ln -sf /etc/sv/crond /var/service/ || true
+ln -s /etc/sv/crond /var/service/ || true
 EOF
   elif [[ "$ROOT_FS" == "bcachefs" ]]; then
     xchroot /mnt /bin/bash <<'EOF'
@@ -470,7 +470,7 @@ if command -v bcachefs >/dev/null 2>&1; then
 fi
 S
 chmod +x /etc/cron.daily/bcachefs-snapshots
-ln -sf /etc/sv/crond /var/service/ || true
+ln -s /etc/sv/crond /var/service/ || true
 EOF
   else
     if [[ "$LVM_CHOICE" == "2" ]]; then
@@ -487,7 +487,7 @@ lvs --noheadings -o lv_name,vg_name | awk '$2=="voidvg" && $1 ~ /^root-snap-/ {p
   | sort | head -n -${KEEP} | xargs -r -I{} lvremove -f "voidvg/{}"
 S
 chmod +x /etc/cron.daily/lvm-root-snapshot
-ln -sf /etc/sv/crond /var/service/ || true
+ln -s /etc/sv/crond /var/service/ || true
 EOF
     fi
   fi
