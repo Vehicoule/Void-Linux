@@ -580,7 +580,6 @@ finalize() {
 # ==============================
 main() {
   check_root
-  check_void
   bootstrap_deps
   gather_config
   setup_partitions
