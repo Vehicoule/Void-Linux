@@ -197,16 +197,37 @@ setup_partitions() {
 
   if [[ "$LVM_CHOICE" == "2" ]]; then
     log_info "Setting up LVM on ${ROOT_MAPPER}"
-    pvcreate "$ROOT_MAPPER"
+    pvcreate -ff -y "$ROOT_MAPPER"
     vgcreate voidvg "$ROOT_MAPPER"
-    # Root 100G, optional 8G swap, home rest
-    [[ "$SWAP_CHOICE" == "2" ]] && lvcreate -L 8G -n swap voidvg || true
-    lvcreate -L 100G -n root voidvg
-    lvcreate -l 100%FREE -n home voidvg
-    ROOT_DEV="/dev/voidvg/root"; HOME_DEV="/dev/voidvg/home"; SWAP_DEV="/dev/voidvg/swap"
-  else
-    ROOT_DEV="$ROOT_MAPPER"; HOME_DEV=""; SWAP_DEV=""
-  fi
+    
+    # Calculate sizes more intelligently
+    local total_size=$(pvdisplay --units B "$ROOT_MAPPER" | grep "PV Size" | awk '{print $3}' | sed 's/B//')
+    local root_size=$((100 * 1024 * 1024 * 1024))  # 100GB in bytes
+    
+    if [[ $total_size -gt $((root_size + 8 * 1024 * 1024 * 1024)) ]]; then
+        [[ "$SWAP_CHOICE" == "2" ]] && lvcreate -L 8G -n swap voidvg
+        lvcreate -L 100G -n root voidvg
+        lvcreate -l 100%FREE -n home voidvg
+    else
+        # If disk is smaller, adjust sizes
+        log_warning "Small disk detected, adjusting LVM sizes"
+        local available_size=$((total_size * 9 / 10))  # Use 90% of disk
+        local root_size=$((available_size * 7 / 10))   # 70% for root
+        local home_size=$((available_size * 3 / 10))   # 30% for home
+        
+        lvcreate -L ${root_size}B -n root voidvg
+        lvcreate -L ${home_size}B -n home voidvg
+        [[ "$SWAP_CHOICE" == "2" ]] && log_warning "Not enough space for swap partition"
+    fi
+    
+    ROOT_DEV="/dev/voidvg/root"
+    HOME_DEV="/dev/voidvg/home"
+    [[ "$SWAP_CHOICE" == "2" ]] && SWAP_DEV="/dev/voidvg/swap" || SWAP_DEV=""
+else
+    ROOT_DEV="$ROOT_MAPPER"
+    HOME_DEV=""
+    SWAP_DEV=""
+fi
 
   case "$ROOT_FS" in
     btrfs)
