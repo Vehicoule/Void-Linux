@@ -593,5 +593,11 @@ main() {
   setup_swapfile_if_needed
   finalize
 }
-trap 'log_error "Script failed at line $LINENO"; exit 1' ERR
+
+trap 'log_error "Script failed at line $LINENO. Check partitions and cleanup."; 
+      umount -R /mnt 2>/dev/null || true; 
+      [[ "$ENC_CHOICE" == "2" ]] && cryptsetup close cryptroot 2>/dev/null || true;
+      [[ "$LVM_CHOICE" == "2" ]] && vgchange -an voidvg 2>/dev/null || true;
+      exit 1' ERR
+
 main "$@"
