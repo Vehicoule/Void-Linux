@@ -358,7 +358,6 @@ echo "${USERNAME}:${USER_PASSWORD}" | chpasswd
 echo "root:${ROOT_PASSWORD}" | chpasswd
 
 # Enable services (runit)
-mkdir -p /var/service
 ln -s /etc/sv/dbus /var/service/
 ln -s /etc/sv/NetworkManager /var/service/
 ln -s /etc/sv/sshd /var/service/
